@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header::LOCATION, HeaderMap, HeaderValue, Response, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -16,29 +16,29 @@ use axum::{
 use cargo_manifest::{Manifest, MaybeInherited::Local};
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 struct AppState {
     limiter: Mutex<RateLimiter>,
-}
-
-fn day_9_init_rate_limiter() -> RateLimiter {
-    RateLimiter::builder()
-        .max(5)
-        .initial(5)
-        .interval(Duration::from_secs(1))
-        .build()
+    game: Mutex<Game>,
 }
 
 #[shuttle_runtime::main]
 async fn main() -> shuttle_axum::ShuttleAxum {
     let limiter = day_9_init_rate_limiter();
+    let game = Game::new();
     let shared_state = Arc::new(AppState {
         limiter: Mutex::new(limiter),
+        game: Mutex::new(game),
     });
 
     let router = Router::new()
+        .route("/12/random-board", get(day_12_random_board))
+        .route("/12/place/:team/:column", post(day_12_place))
+        .route("/12/board", get(day_12_board))
+        .route("/12/reset", post(day_12_reset))
         .route("/9/milk", post(day_9_milk))
         .route("/9/refill", post(day_9_refill))
         .route("/5/manifest", post(day_5_manifest))
@@ -53,7 +53,222 @@ async fn main() -> shuttle_axum::ShuttleAxum {
     Ok(router.into())
 }
 
+// day 12
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameItem {
+    Wall,
+    Empty,
+    Cookie,
+    Milk,
+}
+
+struct Game {
+    board: [[GameItem; 6]; 5],
+    winner: Option<GameItem>,
+    board_full: bool,
+    rng: StdRng,
+}
+
+impl Game {
+    fn new() -> Self {
+        let mut board = [[GameItem::Empty; 6]; 5];
+        Self::reset_board(&mut board);
+        Self {
+            board,
+            winner: None,
+            board_full: false,
+            rng: rand::rngs::StdRng::seed_from_u64(2024),
+        }
+    }
+
+    fn reset(&mut self) {
+        Self::reset_board(&mut self.board);
+        self.winner = None;
+        self.board_full = false;
+        self.rng = rand::rngs::StdRng::seed_from_u64(2024);
+    }
+
+    fn is_column_full(&self, column: usize) -> bool {
+        self.board[0][column] != GameItem::Empty
+    }
+
+    fn is_finished(&self) -> bool {
+        self.winner.is_some() || self.board_full
+    }
+
+    fn put_item(&mut self, item: GameItem, column: usize) {
+        for i in (0..4).rev() {
+            if self.board[i][column] == GameItem::Empty {
+                self.board[i][column] = item;
+                break;
+            }
+        }
+        // check wins
+        self.check_win();
+
+        // check full
+        self.board_full = self.board[0].iter().all(|&item| item != GameItem::Empty);
+    }
+
+    fn put_random_item(&mut self, item: GameItem, row: usize, column: usize) {
+        self.board[row][column] = item;
+        // check wins
+        self.check_win();
+    }
+
+    fn check_win(&mut self) {
+        // check row
+        for i in 0..4 {
+            if self.board[i][1] != GameItem::Empty
+                && self.board[i][1..5]
+                    .windows(2)
+                    .all(|pair| pair[0] == pair[1])
+            {
+                self.winner = Some(self.board[i][1]);
+                return;
+            }
+        }
+        // check column
+        for j in 1..5 {
+            if self.board[0][j] != GameItem::Empty
+                && (1..4).all(|i| self.board[i - 1][j] == self.board[i][j])
+            {
+                self.winner = Some(self.board[0][j]);
+                return;
+            }
+        }
+
+        // check diagonals
+        if self.board[0][1] != GameItem::Empty
+            && (1..4).all(|i| self.board[i - 1][i] == self.board[i][i + 1])
+        {
+            self.winner = Some(self.board[0][1]);
+            return;
+        }
+
+        if self.board[0][4] != GameItem::Empty
+            && (1..4).all(|i| self.board[i - 1][5 - i] == self.board[i][4 - i])
+        {
+            self.winner = Some(self.board[0][4]);
+        }
+    }
+
+    fn print_board(&self) -> String {
+        let mut board = String::new();
+        for i in 0..5 {
+            for j in 0..6 {
+                let cell = match self.board[i][j] {
+                    GameItem::Wall => '⬜',
+                    GameItem::Empty => '⬛',
+                    GameItem::Cookie => '🍪',
+                    GameItem::Milk => '🥛',
+                };
+                board.push(cell);
+            }
+            board.push('\n');
+        }
+        if self.winner.is_some() {
+            board.push(match self.winner.unwrap() {
+                GameItem::Cookie => '🍪',
+                GameItem::Milk => '🥛',
+                _ => unreachable!(),
+            });
+            board.push_str(" wins!\n");
+        } else if self.board_full {
+            board.push_str("No winner.\n");
+        }
+        board
+    }
+
+    fn reset_board(board: &mut [[GameItem; 6]; 5]) {
+        for i in 0..4 {
+            board[i][0] = GameItem::Wall;
+            for j in 1..5 {
+                board[i][j] = GameItem::Empty;
+            }
+            board[i][5] = GameItem::Wall;
+        }
+        for j in 0..6 {
+            board[4][j] = GameItem::Wall;
+        }
+    }
+}
+
+async fn day_12_random_board(State(state): State<Arc<AppState>>) -> Response<Body> {
+    let mut game = state.game.lock().await;
+    for i in 0..4 {
+        for j in 1..5 {
+            let team = if game.rng.gen::<bool>() {
+                GameItem::Cookie
+            } else {
+                GameItem::Milk
+            };
+            game.put_random_item(team, i, j);
+        }
+    }
+    Response::new(Body::from(game.print_board()))
+}
+
+async fn day_12_place(
+    State(state): State<Arc<AppState>>,
+    path: Path<(String, i32)>,
+) -> Response<Body> {
+    let team = match path.0 .0.as_str() {
+        "cookie" => GameItem::Cookie,
+        "milk" => GameItem::Milk,
+        _ => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap()
+        }
+    };
+    let column = path.0 .1;
+    if !(1..=4).contains(&column) {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap();
+    }
+    let column = column as usize;
+    let mut game = state.game.lock().await;
+    if game.is_column_full(column) {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from(game.print_board()))
+            .unwrap();
+    }
+
+    if game.is_finished() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from(game.print_board()))
+            .unwrap();
+    }
+    game.put_item(team, column);
+    Response::new(Body::from(game.print_board()))
+}
+
+async fn day_12_board(State(state): State<Arc<AppState>>) -> Response<Body> {
+    Response::new(Body::from(state.game.lock().await.print_board()))
+}
+
+async fn day_12_reset(State(state): State<Arc<AppState>>) -> Response<Body> {
+    let mut game = state.game.lock().await;
+    game.reset();
+    Response::new(Body::from(game.print_board()))
+}
+
 // day 9
+
+fn day_9_init_rate_limiter() -> RateLimiter {
+    RateLimiter::builder()
+        .max(5)
+        .initial(5)
+        .interval(Duration::from_secs(1))
+        .build()
+}
 
 fn day_9_bad_request() -> Response<Body> {
     Response::builder()
