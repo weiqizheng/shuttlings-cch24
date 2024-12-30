@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::LOCATION, HeaderMap, HeaderValue, Response, StatusCode},
     response::{Html, IntoResponse},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use base64::prelude::*;
@@ -21,25 +21,61 @@ use jsonwebtoken::{
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use serde::Deserialize;
+use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::{prelude::FromRow, types::uuid, PgPool};
 use tokio::sync::Mutex;
+use tracing::*;
 
 struct AppState {
     limiter: Mutex<RateLimiter>,
     game: Mutex<Game>,
+    pool: PgPool,
+}
+
+#[derive(Deserialize, Serialize, FromRow)]
+struct Quote {
+    id: uuid::Uuid,
+    author: String,
+    quote: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    version: i32,
+}
+
+async fn create_database(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS quotes (
+        id UUID PRIMARY KEY,
+        author TEXT NOT NULL,
+        quote TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        version INT NOT NULL DEFAULT 1
+        );
+        "#,
+    )
+    .execute(pool)
+    .await;
 }
 
 #[shuttle_runtime::main]
-async fn main() -> shuttle_axum::ShuttleAxum {
+async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::ShuttleAxum {
+    create_database(&pool).await;
+
     let limiter = day_9_init_rate_limiter();
     let game = Game::new();
     let shared_state = Arc::new(AppState {
         limiter: Mutex::new(limiter),
         game: Mutex::new(game),
+        pool,
     });
 
     let router = Router::new()
+        .route("/19/reset", post(day_19_reset))
+        .route("/19/cite/:id", get(day_19_cite))
+        .route("/19/remove/:id", delete(day_19_remove))
+        .route("/19/undo/:id", put(day_19_undo))
+        .route("/19/draft", post(day_19_draft))
         .route("/16/decode", post(day_16_decode))
         .route("/16/wrap", post(day_16_wrap))
         .route("/16/unwrap", get(day_16_unwrap))
@@ -59,6 +95,135 @@ async fn main() -> shuttle_axum::ShuttleAxum {
         .with_state(shared_state);
 
     Ok(router.into())
+}
+
+// day 19
+#[derive(Deserialize, Debug)]
+struct QuotePost {
+    author: String,
+    quote: String,
+}
+
+async fn day_19_reset(State(state): State<Arc<AppState>>) -> Response<Body> {
+    info!("Resetting quotes");
+    sqlx::query("DELETE FROM quotes")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    Response::new(Body::empty())
+}
+
+async fn day_19_cite(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response<Body> {
+    info!("Fetching quote with id: {}", id);
+    match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+        Err(err) => {
+            println!("error fetching quote: {:?}", err);
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
+}
+
+async fn day_19_remove(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response<Body> {
+    info!("Deleting quote with id: {}", id);
+    match sqlx::query_as::<_, Quote>("DELETE FROM quotes WHERE id = $1 RETURNING *")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+        Err(err) => {
+            println!("error deleting quote: {:?}", err);
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
+}
+
+async fn day_19_undo(
+    Path(id): Path<uuid::Uuid>,
+    State(state): State<Arc<AppState>>,
+    Json(quote_post): Json<QuotePost>,
+) -> Response<Body> {
+    info!("Updating quote with id: {} quote: {:?}", id, quote_post);
+    match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(mut quote) => {
+            quote.version += 1;
+            quote.author = quote_post.author;
+            quote.quote = quote_post.quote;
+            match sqlx::query(
+                "UPDATE quotes SET version = $1, author = $2, quote = $3 WHERE id = $4",
+            )
+            .bind(quote.version)
+            .bind(&quote.author)
+            .bind(&quote.quote)
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            {
+                Ok(_) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+                Err(err) => {
+                    println!("error updating quote: {:?}", err);
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::empty())
+                        .unwrap()
+                }
+            }
+        }
+        Err(err) => {
+            println!("error fetching quote: {:?}", err);
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
+}
+
+async fn day_19_draft(
+    State(state): State<Arc<AppState>>,
+    Json(quote_post): Json<QuotePost>,
+) -> Response<Body> {
+    info!("Creating new quote {:?}", quote_post);
+    let quote = Quote {
+        id: uuid::Uuid::new_v4(),
+        author: quote_post.author,
+        quote: quote_post.quote,
+        created_at: chrono::Utc::now(),
+        version: 1,
+    };
+    sqlx::query("INSERT INTO quotes (id, author, quote, version) VALUES ($1, $2, $3, $4)")
+        .bind(quote.id)
+        .bind(&quote.author)
+        .bind(&quote.quote)
+        .bind(quote.version)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .body(Body::from(serde_json::to_string(&quote).unwrap()))
+        .unwrap()
 }
 
 // day 16
