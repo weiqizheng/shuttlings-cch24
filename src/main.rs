@@ -11,13 +11,18 @@ use axum::{
     http::{header::LOCATION, HeaderMap, HeaderValue, Response, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
+use base64::prelude::*;
 use cargo_manifest::{Manifest, MaybeInherited::Local};
+use jsonwebtoken::{
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -35,6 +40,9 @@ async fn main() -> shuttle_axum::ShuttleAxum {
     });
 
     let router = Router::new()
+        .route("/16/decode", post(day_16_decode))
+        .route("/16/wrap", post(day_16_wrap))
+        .route("/16/unwrap", get(day_16_unwrap))
         .route("/12/random-board", get(day_12_random_board))
         .route("/12/place/:team/:column", post(day_12_place))
         .route("/12/board", get(day_12_board))
@@ -51,6 +59,72 @@ async fn main() -> shuttle_axum::ShuttleAxum {
         .with_state(shared_state);
 
     Ok(router.into())
+}
+
+// day 16
+
+const KEY: &[u8] = include_bytes!("../key/day16_santa_public_key.pem");
+
+async fn day_16_decode(body: String) -> Response<Body> {
+    match decode_header(&body) {
+        Ok(header) => {
+            let mut validation = Validation::new(header.alg);
+            validation.required_spec_claims.clear();
+            match decode::<Value>(&body, &DecodingKey::from_rsa_pem(KEY).unwrap(), &validation) {
+                Ok(token) => Response::new(Body::from(token.claims.to_string())),
+                Err(err) => match err.kind() {
+                    jsonwebtoken::errors::ErrorKind::InvalidSignature => Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::empty())
+                        .unwrap(),
+                    _ => Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap(),
+                },
+            }
+        }
+        Err(err) => Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap(),
+    }
+}
+
+async fn day_16_wrap(Json(body): Json<Value>) -> Response<Body> {
+    let header = Header::new(Algorithm::HS256);
+    let token = encode(&header, &body, &EncodingKey::from_secret("secret".as_ref()));
+
+    Response::builder()
+        .header("set-cookie", format!("gift={}", token.unwrap()))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn day_16_unwrap(headers: HeaderMap) -> Response<Body> {
+    match headers
+        .get("cookie")
+        .and_then(|cookie| cookie.to_str().ok())
+        .and_then(|cookie| cookie.strip_prefix("gift="))
+    {
+        Some(token) => {
+            let parts = token.split('.').collect::<Vec<_>>();
+            match BASE64_URL_SAFE_NO_PAD.decode(parts[1].as_bytes()) {
+                Ok(body) => Response::new(Body::from(body)),
+                Err(err) => {
+                    println!("error decoding body: {:?}", err);
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap()
+                }
+            }
+        }
+        None => Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap(),
+    }
 }
 
 // day 12
