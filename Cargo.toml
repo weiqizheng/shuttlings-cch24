@@ -29,3 +29,5 @@ sqlx = { version = "0.8.2", features = [
     "chrono",
 ] }
 tracing = "0.1.41"
+tower-http = { version = "0.6.2", features = ["fs"] }
+htmlescape = "0.3.1"

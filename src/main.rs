@@ -21,10 +21,11 @@ use jsonwebtoken::{
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{prelude::FromRow, types::uuid, PgPool};
 use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
 use tracing::*;
 
 struct AppState {
@@ -71,6 +72,10 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
     });
 
     let router = Router::new()
+        .nest_service("/assets", ServeDir::new("assets"))
+        .route("/23/star", get(day_23_star))
+        .route("/23/present/:color", get(day_23_present))
+        .route("/23/ornament/:state/:n", get(day_23_ornament))
         .route("/19/reset", post(day_19_reset))
         .route("/19/cite/:id", get(day_19_cite))
         .route("/19/remove/:id", delete(day_19_remove))
@@ -95,6 +100,55 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .with_state(shared_state);
 
     Ok(router.into())
+}
+
+// day 23
+
+async fn day_23_star() -> Response<Body> {
+    Response::new(Body::from(r#"<div id="star" class="lit"></div>"#))
+}
+
+async fn day_23_present(Path(color): Path<String>) -> Response<Body> {
+    let next_color = match color.as_str() {
+        "red" => "blue",
+        "blue" => "purple",
+        "purple" => "red",
+        _ => {
+            return Response::builder()
+                .status(StatusCode::IM_A_TEAPOT)
+                .body(Body::empty())
+                .unwrap()
+        }
+    };
+    Response::new(Body::from(format!(
+        r#"
+        <div class="present {color}" hx-get="/23/present/{next_color}" hx-swap="outerHTML">
+            <div class="ribbon"></div>
+            <div class="ribbon"></div>
+            <div class="ribbon"></div>
+            <div class="ribbon"></div>
+        </div>
+    "#
+    )))
+}
+
+async fn day_23_ornament(Path((state, n)): Path<(String, String)>) -> Response<Body> {
+    let next_state = match state.as_str() {
+        "on" => "off",
+        "off" => "on",
+        _ => {
+            return Response::builder()
+                .status(StatusCode::IM_A_TEAPOT)
+                .body(Body::empty())
+                .unwrap()
+        }
+    };
+    let n = htmlescape::encode_minimal(&n);
+    // changed is removed in hx-trigger
+    Response::new(Body::from(format!(
+        r#"<div class="ornament{}" id="ornament{n}" hx-trigger="load delay:2s once" hx-get="/23/ornament/{next_state}/{n}" hx-swap="outerHTML"></div>"#,
+        if state == "on" { " on" } else { "" }
+    )))
 }
 
 // day 19
