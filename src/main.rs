@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
+    num::ParseIntError,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -8,13 +9,14 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{header::LOCATION, HeaderMap, HeaderValue, Response, StatusCode},
     response::{Html, IntoResponse},
     routing::{delete, get, post, put},
     Json, Router,
 };
 use base64::prelude::*;
+// use cargo_lock::Lockfile;
 use cargo_manifest::{Manifest, MaybeInherited::Local};
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
@@ -79,6 +81,7 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .route("/23/star", get(day_23_star))
         .route("/23/present/:color", get(day_23_present))
         .route("/23/ornament/:state/:n", get(day_23_ornament))
+        .route("/23/lockfile", post(day_23_lockfile))
         .route("/19/reset", post(day_19_reset))
         .route("/19/cite/:id", get(day_19_cite))
         .route("/19/remove/:id", delete(day_19_remove))
@@ -153,6 +156,139 @@ async fn day_23_ornament(Path((state, n)): Path<(String, String)>) -> Response<B
         r#"<div class="ornament{}" id="ornament{n}" hx-trigger="load delay:2s once" hx-get="/23/ornament/{next_state}/{n}" hx-swap="outerHTML"></div>"#,
         if state == "on" { " on" } else { "" }
     )))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LockfileChecksum {
+    color: i32,
+    top: u8,
+    left: u8,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParseChecksumError;
+
+impl From<ParseIntError> for ParseChecksumError {
+    fn from(_: ParseIntError) -> Self {
+        ParseChecksumError
+    }
+}
+
+impl FromStr for LockfileChecksum {
+    type Err = ParseChecksumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() < 10 {
+            return Err(ParseChecksumError);
+        }
+        let color = i32::from_str_radix(&s[..6], 16)?;
+        let top = u8::from_str_radix(&s[6..8], 16)?;
+        let left = u8::from_str_radix(&s[8..10], 16)?;
+        Ok(LockfileChecksum { color, top, left })
+    }
+}
+
+async fn day_23_lockfile(mut multipart: Multipart) -> Response<Body> {
+    let mut body = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap().to_string();
+        let data = field.bytes().await.unwrap();
+        if name != "lockfile" {
+            continue;
+        }
+        body.extend_from_slice(&data);
+    }
+    let body = String::from_utf8(body).unwrap();
+    // toml
+    match body.parse::<toml::Table>() {
+        Ok(lock_toml) => {
+            let mut response = String::new();
+            match lock_toml.get("package").and_then(|item| item.as_array()) {
+                Some(packages) => {
+                    for package in packages {
+                        if let Some(checksum_value) = package.get("checksum") {
+                            if let Some(checksum) = checksum_value.as_str() {
+                                match LockfileChecksum::from_str(checksum) {
+                                    Ok(entry) => {
+                                        response.push_str(&format!(
+                                        r##"<div style="background-color:#{:06x};top:{}px;left:{}px;"></div>{}"##,
+                                        entry.color, entry.top, entry.left, '\n'
+                                    ));
+                                    }
+                                    Err(_) => {
+                                        warn!("checksum parse error {}", checksum);
+                                        return Response::builder()
+                                            .status(StatusCode::UNPROCESSABLE_ENTITY)
+                                            .body(Body::empty())
+                                            .unwrap();
+                                    }
+                                }
+                            } else {
+                                return Response::builder()
+                                    .status(StatusCode::BAD_REQUEST)
+                                    .body(Body::empty())
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+                None => {
+                    return Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap();
+                }
+            }
+            Response::new(Body::from(response))
+        }
+        Err(err) => {
+            warn!("error parsing lockfile: {:?}", err);
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
+    // cargo_lock test #2 failed due to gimli dependency not found in lockfile
+    // match Lockfile::from_str(&body) {
+    //     Ok(lockfile) => {
+    //         let mut response = String::new();
+    //         for package in lockfile.packages {
+    //             match package.checksum {
+    //                 Some(checksum) => match LockfileChecksum::from_str(&checksum.to_string()) {
+    //                     Ok(entry) => {
+    //                         response.push_str(&format!(
+    //                             r##"<div style="background-color:#{:x};top:{}px;left:{}px;"></div>"##,
+    //                             entry.color, entry.top, entry.left
+    //                         ));
+    //                     }
+    //                     Err(_) => {
+    //                         println!("checksum parse error");
+    //                         return Response::builder()
+    //                             .status(StatusCode::UNPROCESSABLE_ENTITY)
+    //                             .body(Body::empty())
+    //                             .unwrap();
+    //                     }
+    //                 },
+    //                 None => {
+    //                     warn!("no checksum for package {}", &package.name);
+    //                     // return Response::builder()
+    //                     //     .status(StatusCode::UNPROCESSABLE_ENTITY)
+    //                     //     .body(Body::empty())
+    //                     //     .unwrap();
+    //                 }
+    //             }
+    //         }
+    //         Response::new(Body::from(response))
+    //     }
+    //     Err(err) => {
+    //         warn!("error parsing lockfile: {:?}", err);
+    //         Response::builder()
+    //             .status(StatusCode::BAD_REQUEST)
+    //             .body(Body::empty())
+    //             .unwrap()
+    //     }
+    // }
 }
 
 // day 19
