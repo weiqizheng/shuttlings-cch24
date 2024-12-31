@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
     str::FromStr,
     sync::Arc,
@@ -20,10 +21,10 @@ use jsonwebtoken::{
 };
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{distributions::Alphanumeric, rngs::StdRng, thread_rng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{prelude::FromRow, types::uuid, PgPool};
+use sqlx::{postgres::PgQueryResult, prelude::FromRow, types::uuid, PgPool};
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tracing::*;
@@ -32,6 +33,7 @@ struct AppState {
     limiter: Mutex<RateLimiter>,
     game: Mutex<Game>,
     pool: PgPool,
+    pages: Mutex<HashMap<String, i64>>,
 }
 
 #[derive(Deserialize, Serialize, FromRow)]
@@ -43,25 +45,25 @@ struct Quote {
     version: i32,
 }
 
-async fn create_database(pool: &PgPool) {
+async fn create_database(pool: &PgPool) -> sqlx::Result<PgQueryResult> {
     sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS quotes (
+        r#"CREATE TABLE IF NOT EXISTS quotes (
         id UUID PRIMARY KEY,
         author TEXT NOT NULL,
         quote TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         version INT NOT NULL DEFAULT 1
-        );
-        "#,
+        );"#,
     )
     .execute(pool)
-    .await;
+    .await
 }
 
 #[shuttle_runtime::main]
 async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::ShuttleAxum {
-    create_database(&pool).await;
+    create_database(&pool)
+        .await
+        .expect("Failed to create database");
 
     let limiter = day_9_init_rate_limiter();
     let game = Game::new();
@@ -69,6 +71,7 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         limiter: Mutex::new(limiter),
         game: Mutex::new(game),
         pool,
+        pages: Mutex::new(HashMap::new()),
     });
 
     let router = Router::new()
@@ -81,6 +84,7 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .route("/19/remove/:id", delete(day_19_remove))
         .route("/19/undo/:id", put(day_19_undo))
         .route("/19/draft", post(day_19_draft))
+        .route("/19/list", get(day_19_list))
         .route("/16/decode", post(day_16_decode))
         .route("/16/wrap", post(day_16_wrap))
         .route("/16/unwrap", get(day_16_unwrap))
@@ -152,14 +156,14 @@ async fn day_23_ornament(Path((state, n)): Path<(String, String)>) -> Response<B
 }
 
 // day 19
-#[derive(Deserialize, Debug)]
+
+#[derive(Deserialize)]
 struct QuotePost {
     author: String,
     quote: String,
 }
 
 async fn day_19_reset(State(state): State<Arc<AppState>>) -> Response<Body> {
-    info!("Resetting quotes");
     sqlx::query("DELETE FROM quotes")
         .execute(&state.pool)
         .await
@@ -171,7 +175,6 @@ async fn day_19_cite(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> Response<Body> {
-    info!("Fetching quote with id: {}", id);
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
@@ -179,7 +182,7 @@ async fn day_19_cite(
     {
         Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
         Err(err) => {
-            println!("error fetching quote: {:?}", err);
+            warn!("cite: error fetching quote with id {id}: {:?}", err);
             Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Body::empty())
@@ -192,7 +195,6 @@ async fn day_19_remove(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> Response<Body> {
-    info!("Deleting quote with id: {}", id);
     match sqlx::query_as::<_, Quote>("DELETE FROM quotes WHERE id = $1 RETURNING *")
         .bind(id)
         .fetch_one(&state.pool)
@@ -200,11 +202,18 @@ async fn day_19_remove(
     {
         Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
         Err(err) => {
-            println!("error deleting quote: {:?}", err);
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap()
+            if !matches!(err, sqlx::Error::RowNotFound) {
+                warn!("Delete row err {:?}", err);
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::empty())
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap()
+            }
         }
     }
 }
@@ -214,7 +223,6 @@ async fn day_19_undo(
     State(state): State<Arc<AppState>>,
     Json(quote_post): Json<QuotePost>,
 ) -> Response<Body> {
-    info!("Updating quote with id: {} quote: {:?}", id, quote_post);
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
@@ -236,7 +244,7 @@ async fn day_19_undo(
             {
                 Ok(_) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
                 Err(err) => {
-                    println!("error updating quote: {:?}", err);
+                    warn!("error updating quote: {:?}", err);
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Body::empty())
@@ -245,7 +253,7 @@ async fn day_19_undo(
             }
         }
         Err(err) => {
-            println!("error fetching quote: {:?}", err);
+            warn!("undo: error fetching quote with id {id}: {:?}", err);
             Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Body::empty())
@@ -258,7 +266,6 @@ async fn day_19_draft(
     State(state): State<Arc<AppState>>,
     Json(quote_post): Json<QuotePost>,
 ) -> Response<Body> {
-    info!("Creating new quote {:?}", quote_post);
     let quote = Quote {
         id: uuid::Uuid::new_v4(),
         author: quote_post.author,
@@ -266,18 +273,95 @@ async fn day_19_draft(
         created_at: chrono::Utc::now(),
         version: 1,
     };
-    sqlx::query("INSERT INTO quotes (id, author, quote, version) VALUES ($1, $2, $3, $4)")
+    match sqlx::query("INSERT INTO quotes (id, author, quote, version) VALUES ($1, $2, $3, $4)")
         .bind(quote.id)
         .bind(&quote.author)
         .bind(&quote.quote)
         .bind(quote.version)
         .execute(&state.pool)
         .await
-        .unwrap();
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .body(Body::from(serde_json::to_string(&quote).unwrap()))
-        .unwrap()
+    {
+        Ok(_) => Response::builder()
+            .status(StatusCode::CREATED)
+            .body(Body::from(serde_json::to_string(&quote).unwrap()))
+            .unwrap(),
+        Err(err) => {
+            warn!(
+                "draft: insert quote {} with author {} failed: err {:?}",
+                quote.quote, quote.author, err
+            );
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct QuotePage {
+    quotes: Vec<Quote>,
+    page: i64,
+    next_token: Option<String>,
+}
+
+async fn day_19_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response<Body> {
+    let mut tokens = state.pages.lock().await;
+    let offset = match params.get("token") {
+        Some(token) => match tokens.remove(token) {
+            Some(offset) => offset,
+            None => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        },
+        None => 0,
+    };
+
+    match sqlx::query_as::<_, Quote>(
+        "SELECT * FROM quotes ORDER BY created_at ASC LIMIT 3 OFFSET $1",
+    )
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(quotes) => {
+            let offset = offset + quotes.len() as i64;
+            let total_cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quotes")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+            let next_token = if offset == total_cnt {
+                None
+            } else {
+                let next_token: String = thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(16)
+                    .map(char::from)
+                    .collect();
+                tokens.insert(next_token.clone(), offset);
+                Some(next_token)
+            };
+            let quotes_page = QuotePage {
+                quotes,
+                page: (offset + 2) / 3,
+                next_token,
+            };
+            Response::new(Body::from(serde_json::to_string(&quotes_page).unwrap()))
+        }
+        Err(err) => {
+            warn!("list: error fetching quotes: {:?}", err);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap()
+        }
+    }
 }
 
 // day 16
@@ -303,10 +387,13 @@ async fn day_16_decode(body: String) -> Response<Body> {
                 },
             }
         }
-        Err(err) => Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::empty())
-            .unwrap(),
+        Err(err) => {
+            warn!("error decoding header: {:?}", err);
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap()
+        }
     }
 }
 
@@ -331,7 +418,7 @@ async fn day_16_unwrap(headers: HeaderMap) -> Response<Body> {
             match BASE64_URL_SAFE_NO_PAD.decode(parts[1].as_bytes()) {
                 Ok(body) => Response::new(Body::from(body)),
                 Err(err) => {
-                    println!("error decoding body: {:?}", err);
+                    warn!("error decoding body: {:?}", err);
                     Response::builder()
                         .status(StatusCode::BAD_REQUEST)
                         .body(Body::empty())
@@ -505,9 +592,9 @@ async fn day_12_random_board(State(state): State<Arc<AppState>>) -> Response<Bod
 
 async fn day_12_place(
     State(state): State<Arc<AppState>>,
-    path: Path<(String, i32)>,
+    Path((team, column)): Path<(String, i32)>,
 ) -> Response<Body> {
-    let team = match path.0 .0.as_str() {
+    let team = match team.as_str() {
         "cookie" => GameItem::Cookie,
         "milk" => GameItem::Milk,
         _ => {
@@ -517,7 +604,6 @@ async fn day_12_place(
                 .unwrap()
         }
     };
-    let column = path.0 .1;
     if !(1..=4).contains(&column) {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
