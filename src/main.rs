@@ -31,50 +31,11 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tracing::*;
 
-struct AppState {
-    limiter: Mutex<RateLimiter>,
-    game: Mutex<Game>,
-    pool: PgPool,
-    pages: Mutex<HashMap<String, i64>>,
-}
-
-#[derive(Deserialize, Serialize, FromRow)]
-struct Quote {
-    id: uuid::Uuid,
-    author: String,
-    quote: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    version: i32,
-}
-
-async fn create_database(pool: &PgPool) -> sqlx::Result<PgQueryResult> {
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS quotes (
-        id UUID PRIMARY KEY,
-        author TEXT NOT NULL,
-        quote TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        version INT NOT NULL DEFAULT 1
-        );"#,
-    )
-    .execute(pool)
-    .await
-}
-
 #[shuttle_runtime::main]
 async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::ShuttleAxum {
     create_database(&pool)
         .await
         .expect("Failed to create database");
-
-    let limiter = day_9_init_rate_limiter();
-    let game = Game::new();
-    let shared_state = Arc::new(AppState {
-        limiter: Mutex::new(limiter),
-        game: Mutex::new(game),
-        pool,
-        pages: Mutex::new(HashMap::new()),
-    });
 
     let router = Router::new()
         .nest_service("/assets", ServeDir::new("assets"))
@@ -88,6 +49,10 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .route("/19/undo/:id", put(day_19_undo))
         .route("/19/draft", post(day_19_draft))
         .route("/19/list", get(day_19_list))
+        .with_state(Arc::new(Day19AppState {
+            pool,
+            pages: Mutex::new(HashMap::new()),
+        }))
         .route("/16/decode", post(day_16_decode))
         .route("/16/wrap", post(day_16_wrap))
         .route("/16/unwrap", get(day_16_unwrap))
@@ -95,16 +60,21 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .route("/12/place/:team/:column", post(day_12_place))
         .route("/12/board", get(day_12_board))
         .route("/12/reset", post(day_12_reset))
+        .with_state(Arc::new(Day12AppState {
+            game: Mutex::new(Game::new()),
+        }))
         .route("/9/milk", post(day_9_milk))
         .route("/9/refill", post(day_9_refill))
+        .with_state(Arc::new(Day9AppState {
+            limiter: Mutex::new(day_9_init_rate_limiter()),
+        }))
         .route("/5/manifest", post(day_5_manifest))
         .route("/2/dest", get(day_2_dest))
         .route("/2/key", get(day_2_key))
         .route("/2/v6/dest", get(day_2_v6_dest))
         .route("/2/v6/key", get(day_2_v6_key))
         .route("/-1/seek", get(day_1_seek))
-        .route("/", get(day_1_hello_world))
-        .with_state(shared_state);
+        .route("/", get(day_1_hello_world));
 
     Ok(router.into())
 }
@@ -285,7 +255,35 @@ struct QuotePost {
     quote: String,
 }
 
-async fn day_19_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+struct Day19AppState {
+    pool: PgPool,
+    pages: Mutex<HashMap<String, i64>>,
+}
+
+#[derive(Deserialize, Serialize, FromRow)]
+struct Quote {
+    id: uuid::Uuid,
+    author: String,
+    quote: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    version: i32,
+}
+
+async fn create_database(pool: &PgPool) -> sqlx::Result<PgQueryResult> {
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS quotes (
+        id UUID PRIMARY KEY,
+        author TEXT NOT NULL,
+        quote TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        version INT NOT NULL DEFAULT 1
+        );"#,
+    )
+    .execute(pool)
+    .await
+}
+
+async fn day_19_reset(State(state): State<Arc<Day19AppState>>) -> impl IntoResponse {
     sqlx::query("DELETE FROM quotes")
         .execute(&state.pool)
         .await
@@ -294,7 +292,7 @@ async fn day_19_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn day_19_cite(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day19AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
@@ -314,7 +312,7 @@ async fn day_19_cite(
 }
 
 async fn day_19_remove(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day19AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("DELETE FROM quotes WHERE id = $1 RETURNING *")
@@ -339,7 +337,7 @@ async fn day_19_remove(
 
 async fn day_19_undo(
     Path(id): Path<uuid::Uuid>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day19AppState>>,
     Json(quote_post): Json<QuotePost>,
 ) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
@@ -379,7 +377,7 @@ async fn day_19_undo(
 }
 
 async fn day_19_draft(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day19AppState>>,
     Json(quote_post): Json<QuotePost>,
 ) -> (StatusCode, Body) {
     let quote = Quote {
@@ -419,7 +417,7 @@ struct QuotePage {
 }
 
 async fn day_19_list(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day19AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, Body) {
     let mut tokens = state.pages.lock().await;
@@ -528,6 +526,10 @@ async fn day_16_unwrap(headers: HeaderMap) -> (StatusCode, Body) {
 }
 
 // day 12
+
+struct Day12AppState {
+    game: Mutex<Game>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GameItem {
@@ -669,7 +671,7 @@ impl Game {
     }
 }
 
-async fn day_12_random_board(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn day_12_random_board(State(state): State<Arc<Day12AppState>>) -> impl IntoResponse {
     let mut game = state.game.lock().await;
     for i in 0..4 {
         for j in 1..5 {
@@ -685,7 +687,7 @@ async fn day_12_random_board(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 async fn day_12_place(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day12AppState>>,
     Path((team, column)): Path<(String, i32)>,
 ) -> (StatusCode, Body) {
     let team = match team.as_str() {
@@ -717,17 +719,21 @@ async fn day_12_place(
     (StatusCode::OK, Body::from(game.print_board()))
 }
 
-async fn day_12_board(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn day_12_board(State(state): State<Arc<Day12AppState>>) -> impl IntoResponse {
     state.game.lock().await.print_board()
 }
 
-async fn day_12_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn day_12_reset(State(state): State<Arc<Day12AppState>>) -> impl IntoResponse {
     let mut game = state.game.lock().await;
     game.reset();
     game.print_board()
 }
 
 // day 9
+
+struct Day9AppState {
+    limiter: Mutex<RateLimiter>,
+}
 
 fn day_9_init_rate_limiter() -> RateLimiter {
     RateLimiter::builder()
@@ -742,7 +748,7 @@ fn day_9_bad_request() -> (StatusCode, Body) {
 }
 
 async fn day_9_milk(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<Day9AppState>>,
     headers: HeaderMap,
     body: String,
 ) -> (StatusCode, Body) {
@@ -814,7 +820,7 @@ async fn day_9_milk(
     }
 }
 
-async fn day_9_refill(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn day_9_refill(State(state): State<Arc<Day9AppState>>) -> impl IntoResponse {
     let mut limiter = state.limiter.lock().await;
     *limiter = day_9_init_rate_limiter();
     ""
