@@ -10,8 +10,8 @@ use std::{
 use axum::{
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{header::LOCATION, HeaderMap, HeaderValue, Response, StatusCode},
-    response::{Html, IntoResponse},
+    http::{header::LOCATION, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -111,51 +111,49 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
 
 // day 23
 
-async fn day_23_star() -> Response<Body> {
-    Response::new(Body::from(r#"<div id="star" class="lit"></div>"#))
+async fn day_23_star() -> impl IntoResponse {
+    r#"<div id="star" class="lit"></div>"#
 }
 
-async fn day_23_present(Path(color): Path<String>) -> Response<Body> {
+async fn day_23_present(Path(color): Path<String>) -> (StatusCode, String) {
     let next_color = match color.as_str() {
         "red" => "blue",
         "blue" => "purple",
         "purple" => "red",
         _ => {
-            return Response::builder()
-                .status(StatusCode::IM_A_TEAPOT)
-                .body(Body::empty())
-                .unwrap()
+            return (StatusCode::IM_A_TEAPOT, "".to_string());
         }
     };
-    Response::new(Body::from(format!(
-        r#"
-        <div class="present {color}" hx-get="/23/present/{next_color}" hx-swap="outerHTML">
-            <div class="ribbon"></div>
-            <div class="ribbon"></div>
-            <div class="ribbon"></div>
-            <div class="ribbon"></div>
-        </div>
-    "#
-    )))
+    (
+        StatusCode::OK,
+        format!(
+            r#"<div class="present {color}" hx-get="/23/present/{next_color}" hx-swap="outerHTML">
+                <div class="ribbon"></div>
+                <div class="ribbon"></div>
+                <div class="ribbon"></div>
+                <div class="ribbon"></div>
+            </div>"#
+        ),
+    )
 }
 
-async fn day_23_ornament(Path((state, n)): Path<(String, String)>) -> Response<Body> {
+async fn day_23_ornament(Path((state, n)): Path<(String, String)>) -> (StatusCode, String) {
     let next_state = match state.as_str() {
         "on" => "off",
         "off" => "on",
         _ => {
-            return Response::builder()
-                .status(StatusCode::IM_A_TEAPOT)
-                .body(Body::empty())
-                .unwrap()
+            return (StatusCode::IM_A_TEAPOT, "".to_string());
         }
     };
     let n = htmlescape::encode_minimal(&n);
     // changed is removed in hx-trigger
-    Response::new(Body::from(format!(
-        r#"<div class="ornament{}" id="ornament{n}" hx-trigger="load delay:2s once" hx-get="/23/ornament/{next_state}/{n}" hx-swap="outerHTML"></div>"#,
-        if state == "on" { " on" } else { "" }
-    )))
+    (
+        StatusCode::OK,
+        format!(
+            r#"<div class="ornament{}" id="ornament{n}" hx-trigger="load delay:2s once" hx-get="/23/ornament/{next_state}/{n}" hx-swap="outerHTML"></div>"#,
+            if state == "on" { " on" } else { "" }
+        ),
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -188,7 +186,7 @@ impl FromStr for LockfileChecksum {
     }
 }
 
-async fn day_23_lockfile(mut multipart: Multipart) -> Response<Body> {
+async fn day_23_lockfile(mut multipart: Multipart) -> (StatusCode, Body) {
     let mut body = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap().to_string();
@@ -217,36 +215,24 @@ async fn day_23_lockfile(mut multipart: Multipart) -> Response<Body> {
                                     }
                                     Err(_) => {
                                         warn!("checksum parse error {}", checksum);
-                                        return Response::builder()
-                                            .status(StatusCode::UNPROCESSABLE_ENTITY)
-                                            .body(Body::empty())
-                                            .unwrap();
+                                        return (StatusCode::UNPROCESSABLE_ENTITY, Body::empty());
                                     }
                                 }
                             } else {
-                                return Response::builder()
-                                    .status(StatusCode::BAD_REQUEST)
-                                    .body(Body::empty())
-                                    .unwrap();
+                                return (StatusCode::BAD_REQUEST, Body::empty());
                             }
                         }
                     }
                 }
                 None => {
-                    return Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Body::empty())
-                        .unwrap();
+                    return (StatusCode::BAD_REQUEST, Body::empty());
                 }
             }
-            Response::new(Body::from(response))
+            (StatusCode::OK, Body::from(response))
         }
         Err(err) => {
             warn!("error parsing lockfile: {:?}", err);
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::BAD_REQUEST, Body::empty())
         }
     }
     // cargo_lock test #2 failed due to gimli dependency not found in lockfile
@@ -299,30 +285,30 @@ struct QuotePost {
     quote: String,
 }
 
-async fn day_19_reset(State(state): State<Arc<AppState>>) -> Response<Body> {
+async fn day_19_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     sqlx::query("DELETE FROM quotes")
         .execute(&state.pool)
         .await
         .unwrap();
-    Response::new(Body::empty())
+    ""
 }
 
 async fn day_19_cite(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
         .await
     {
-        Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+        Ok(quote) => (
+            StatusCode::OK,
+            Body::from(serde_json::to_string(&quote).unwrap()),
+        ),
         Err(err) => {
             warn!("cite: error fetching quote with id {id}: {:?}", err);
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::NOT_FOUND, Body::empty())
         }
     }
 }
@@ -330,25 +316,22 @@ async fn day_19_cite(
 async fn day_19_remove(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("DELETE FROM quotes WHERE id = $1 RETURNING *")
         .bind(id)
         .fetch_one(&state.pool)
         .await
     {
-        Ok(quote) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+        Ok(quote) => (
+            StatusCode::OK,
+            Body::from(serde_json::to_string(&quote).unwrap()),
+        ),
         Err(err) => {
             if !matches!(err, sqlx::Error::RowNotFound) {
                 warn!("Delete row err {:?}", err);
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty())
-                    .unwrap()
+                (StatusCode::INTERNAL_SERVER_ERROR, Body::empty())
             } else {
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::empty())
-                    .unwrap()
+                (StatusCode::NOT_FOUND, Body::empty())
             }
         }
     }
@@ -358,7 +341,7 @@ async fn day_19_undo(
     Path(id): Path<uuid::Uuid>,
     State(state): State<Arc<AppState>>,
     Json(quote_post): Json<QuotePost>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     match sqlx::query_as::<_, Quote>("SELECT * FROM quotes WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
@@ -378,22 +361,19 @@ async fn day_19_undo(
             .execute(&state.pool)
             .await
             {
-                Ok(_) => Response::new(Body::from(serde_json::to_string(&quote).unwrap())),
+                Ok(_) => (
+                    StatusCode::OK,
+                    Body::from(serde_json::to_string(&quote).unwrap()),
+                ),
                 Err(err) => {
                     warn!("error updating quote: {:?}", err);
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::empty())
-                        .unwrap()
+                    (StatusCode::INTERNAL_SERVER_ERROR, Body::empty())
                 }
             }
         }
         Err(err) => {
             warn!("undo: error fetching quote with id {id}: {:?}", err);
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::NOT_FOUND, Body::empty())
         }
     }
 }
@@ -401,7 +381,7 @@ async fn day_19_undo(
 async fn day_19_draft(
     State(state): State<Arc<AppState>>,
     Json(quote_post): Json<QuotePost>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     let quote = Quote {
         id: uuid::Uuid::new_v4(),
         author: quote_post.author,
@@ -417,19 +397,16 @@ async fn day_19_draft(
         .execute(&state.pool)
         .await
     {
-        Ok(_) => Response::builder()
-            .status(StatusCode::CREATED)
-            .body(Body::from(serde_json::to_string(&quote).unwrap()))
-            .unwrap(),
+        Ok(_) => (
+            StatusCode::CREATED,
+            Body::from(serde_json::to_string(&quote).unwrap()),
+        ),
         Err(err) => {
             warn!(
                 "draft: insert quote {} with author {} failed: err {:?}",
                 quote.quote, quote.author, err
             );
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::INTERNAL_SERVER_ERROR, Body::empty())
         }
     }
 }
@@ -444,16 +421,13 @@ struct QuotePage {
 async fn day_19_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     let mut tokens = state.pages.lock().await;
     let offset = match params.get("token") {
         Some(token) => match tokens.remove(token) {
             Some(offset) => offset,
             None => {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::empty())
-                    .unwrap();
+                return (StatusCode::BAD_REQUEST, Body::empty());
             }
         },
         None => 0,
@@ -488,14 +462,14 @@ async fn day_19_list(
                 page: (offset + 2) / 3,
                 next_token,
             };
-            Response::new(Body::from(serde_json::to_string(&quotes_page).unwrap()))
+            (
+                StatusCode::OK,
+                Body::from(serde_json::to_string(&quotes_page).unwrap()),
+            )
         }
         Err(err) => {
             warn!("list: error fetching quotes: {:?}", err);
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::INTERNAL_SERVER_ERROR, Body::empty())
         }
     }
 }
@@ -504,46 +478,36 @@ async fn day_19_list(
 
 const KEY: &[u8] = include_bytes!("../key/day16_santa_public_key.pem");
 
-async fn day_16_decode(body: String) -> Response<Body> {
+async fn day_16_decode(body: String) -> (StatusCode, Body) {
     match decode_header(&body) {
         Ok(header) => {
             let mut validation = Validation::new(header.alg);
             validation.required_spec_claims.clear();
             match decode::<Value>(&body, &DecodingKey::from_rsa_pem(KEY).unwrap(), &validation) {
-                Ok(token) => Response::new(Body::from(token.claims.to_string())),
+                Ok(token) => (StatusCode::OK, Body::from(token.claims.to_string())),
                 Err(err) => match err.kind() {
-                    jsonwebtoken::errors::ErrorKind::InvalidSignature => Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::empty())
-                        .unwrap(),
-                    _ => Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Body::empty())
-                        .unwrap(),
+                    jsonwebtoken::errors::ErrorKind::InvalidSignature => {
+                        (StatusCode::UNAUTHORIZED, Body::empty())
+                    }
+                    _ => (StatusCode::BAD_REQUEST, Body::empty()),
                 },
             }
         }
         Err(err) => {
             warn!("error decoding header: {:?}", err);
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::empty())
-                .unwrap()
+            (StatusCode::BAD_REQUEST, Body::empty())
         }
     }
 }
 
-async fn day_16_wrap(Json(body): Json<Value>) -> Response<Body> {
+async fn day_16_wrap(Json(body): Json<Value>) -> impl IntoResponse {
     let header = Header::new(Algorithm::HS256);
     let token = encode(&header, &body, &EncodingKey::from_secret("secret".as_ref()));
 
-    Response::builder()
-        .header("set-cookie", format!("gift={}", token.unwrap()))
-        .body(Body::empty())
-        .unwrap()
+    [("set-cookie", format!("gift={}", token.unwrap()))]
 }
 
-async fn day_16_unwrap(headers: HeaderMap) -> Response<Body> {
+async fn day_16_unwrap(headers: HeaderMap) -> (StatusCode, Body) {
     match headers
         .get("cookie")
         .and_then(|cookie| cookie.to_str().ok())
@@ -552,20 +516,14 @@ async fn day_16_unwrap(headers: HeaderMap) -> Response<Body> {
         Some(token) => {
             let parts = token.split('.').collect::<Vec<_>>();
             match BASE64_URL_SAFE_NO_PAD.decode(parts[1].as_bytes()) {
-                Ok(body) => Response::new(Body::from(body)),
+                Ok(body) => (StatusCode::OK, Body::from(body)),
                 Err(err) => {
                     warn!("error decoding body: {:?}", err);
-                    Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Body::empty())
-                        .unwrap()
+                    (StatusCode::BAD_REQUEST, Body::empty())
                 }
             }
         }
-        None => Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::empty())
-            .unwrap(),
+        None => (StatusCode::BAD_REQUEST, Body::empty()),
     }
 }
 
@@ -711,7 +669,7 @@ impl Game {
     }
 }
 
-async fn day_12_random_board(State(state): State<Arc<AppState>>) -> Response<Body> {
+async fn day_12_random_board(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut game = state.game.lock().await;
     for i in 0..4 {
         for j in 1..5 {
@@ -723,56 +681,50 @@ async fn day_12_random_board(State(state): State<Arc<AppState>>) -> Response<Bod
             game.put_random_item(team, i, j);
         }
     }
-    Response::new(Body::from(game.print_board()))
+    game.print_board()
 }
 
 async fn day_12_place(
     State(state): State<Arc<AppState>>,
     Path((team, column)): Path<(String, i32)>,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     let team = match team.as_str() {
         "cookie" => GameItem::Cookie,
         "milk" => GameItem::Milk,
         _ => {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::empty())
-                .unwrap()
+            return (StatusCode::BAD_REQUEST, Body::empty());
         }
     };
     if !(1..=4).contains(&column) {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::empty())
-            .unwrap();
+        return (StatusCode::BAD_REQUEST, Body::empty());
     }
     let column = column as usize;
     let mut game = state.game.lock().await;
     if game.is_column_full(column) {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(Body::from(game.print_board()))
-            .unwrap();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Body::from(game.print_board()),
+        );
     }
 
     if game.is_finished() {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(Body::from(game.print_board()))
-            .unwrap();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Body::from(game.print_board()),
+        );
     }
     game.put_item(team, column);
-    Response::new(Body::from(game.print_board()))
+    (StatusCode::OK, Body::from(game.print_board()))
 }
 
-async fn day_12_board(State(state): State<Arc<AppState>>) -> Response<Body> {
-    Response::new(Body::from(state.game.lock().await.print_board()))
+async fn day_12_board(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.game.lock().await.print_board()
 }
 
-async fn day_12_reset(State(state): State<Arc<AppState>>) -> Response<Body> {
+async fn day_12_reset(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut game = state.game.lock().await;
     game.reset();
-    Response::new(Body::from(game.print_board()))
+    game.print_board()
 }
 
 // day 9
@@ -785,18 +737,15 @@ fn day_9_init_rate_limiter() -> RateLimiter {
         .build()
 }
 
-fn day_9_bad_request() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .body(Body::empty())
-        .unwrap()
+fn day_9_bad_request() -> (StatusCode, Body) {
+    (StatusCode::BAD_REQUEST, Body::empty())
 }
 
 async fn day_9_milk(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
-) -> Response<Body> {
+) -> (StatusCode, Body) {
     let withdrawn = state.limiter.lock().await.try_acquire(1);
     match headers.get("content-type") {
         Some(content_type) if content_type == HeaderValue::from_static("application/json") => {
@@ -812,7 +761,7 @@ async fn day_9_milk(
                             let gallons = liters / 3.78541253;
                             let mut data = json::JsonValue::new_object();
                             data["gallons"] = gallons.into();
-                            Response::new(Body::from(data.dump()))
+                            (StatusCode::OK, Body::from(data.dump()))
                         } else {
                             day_9_bad_request()
                         }
@@ -822,7 +771,7 @@ async fn day_9_milk(
                             let liters = gallons * 3.78541253;
                             let mut data = json::JsonValue::new_object();
                             data["liters"] = liters.into();
-                            Response::new(Body::from(data.dump()))
+                            (StatusCode::OK, Body::from(data.dump()))
                         } else {
                             day_9_bad_request()
                         }
@@ -832,7 +781,7 @@ async fn day_9_milk(
                             let pints = litres * 1.7598;
                             let mut data = json::JsonValue::new_object();
                             data["pints"] = pints.into();
-                            Response::new(Body::from(data.dump()))
+                            (StatusCode::OK, Body::from(data.dump()))
                         } else {
                             day_9_bad_request()
                         }
@@ -842,7 +791,7 @@ async fn day_9_milk(
                             let litres = pints / 1.7598;
                             let mut data = json::JsonValue::new_object();
                             data["litres"] = litres.into();
-                            Response::new(Body::from(data.dump()))
+                            (StatusCode::OK, Body::from(data.dump()))
                         } else {
                             day_9_bad_request()
                         }
@@ -854,26 +803,26 @@ async fn day_9_milk(
         }
         _ => {
             if withdrawn {
-                Response::new(Body::from("Milk withdrawn\n"))
+                (StatusCode::OK, Body::from("Milk withdrawn\n"))
             } else {
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .body(Body::from("No milk available\n"))
-                    .unwrap()
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Body::from("No milk available\n"),
+                )
             }
         }
     }
 }
 
-async fn day_9_refill(State(state): State<Arc<AppState>>) -> Response<Body> {
+async fn day_9_refill(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut limiter = state.limiter.lock().await;
     *limiter = day_9_init_rate_limiter();
-    Response::new(Body::empty())
+    ""
 }
 
 // day 5
 
-fn day_5_handle_toml(body: String) -> Response<Body> {
+fn day_5_handle_toml(body: String) -> (StatusCode, Body) {
     match Manifest::from_str(&body) {
         Ok(manifest) => {
             let contains_magic_keyword = match manifest
@@ -910,7 +859,7 @@ fn day_5_handle_toml(body: String) -> Response<Body> {
                     if orders.is_empty() {
                         day_5_no_content_response()
                     } else {
-                        Response::new(Body::from(orders.join("\n")))
+                        (StatusCode::OK, Body::from(orders.join("\n")))
                     }
                 }
                 _ => day_5_no_content_response(),
@@ -920,35 +869,26 @@ fn day_5_handle_toml(body: String) -> Response<Body> {
     }
 }
 
-fn day_5_no_content_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap()
+fn day_5_no_content_response() -> (StatusCode, Body) {
+    (StatusCode::NO_CONTENT, Body::empty())
 }
 
-fn day_5_invalid_manifest_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .body(Body::from("Invalid manifest"))
-        .unwrap()
+fn day_5_invalid_manifest_response() -> (StatusCode, Body) {
+    (StatusCode::BAD_REQUEST, Body::from("Invalid manifest"))
 }
 
-fn day_5_magic_keyword_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .body(Body::from("Magic keyword not provided"))
-        .unwrap()
+fn day_5_magic_keyword_response() -> (StatusCode, Body) {
+    (
+        StatusCode::BAD_REQUEST,
+        Body::from("Magic keyword not provided"),
+    )
 }
 
-fn day_5_unsupported_media_type_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-        .body(Body::empty())
-        .unwrap()
+fn day_5_unsupported_media_type_response() -> (StatusCode, Body) {
+    (StatusCode::UNSUPPORTED_MEDIA_TYPE, Body::empty())
 }
 
-async fn day_5_manifest(headers: HeaderMap, body: String) -> Response<Body> {
+async fn day_5_manifest(headers: HeaderMap, body: String) -> (StatusCode, Body) {
     match headers.get("content-type") {
         Some(content_type) if content_type == HeaderValue::from_static("application/toml") => {
             day_5_handle_toml(body)
@@ -985,7 +925,7 @@ async fn day_2_dest(query: Query<Day2DestQuery>) -> impl IntoResponse {
         .for_each(|(from, key)| *from = from.wrapping_add(key));
     let dest = Ipv4Addr::new(from[0], from[1], from[2], from[3]);
 
-    Html(dest.to_string())
+    dest.to_string()
 }
 
 #[derive(Deserialize)]
@@ -1002,7 +942,7 @@ async fn day_2_key(query: Query<Day2KeyQuery>) -> impl IntoResponse {
         .for_each(|(to, from)| *to = to.wrapping_sub(from));
 
     let key = Ipv4Addr::new(to[0], to[1], to[2], to[3]);
-    Html(key.to_string())
+    key.to_string()
 }
 
 #[derive(Deserialize)]
@@ -1014,7 +954,7 @@ struct Day2V6DestQuery {
 async fn day_2_v6_dest(query: Query<Day2V6DestQuery>) -> impl IntoResponse {
     let dest = Ipv6Addr::from_bits(query.from.to_bits() ^ query.key.to_bits());
 
-    Html(dest.to_string())
+    dest.to_string()
 }
 
 #[derive(Deserialize)]
@@ -1026,7 +966,7 @@ struct Day2V6KeyQuery {
 async fn day_2_v6_key(query: Query<Day2V6KeyQuery>) -> impl IntoResponse {
     let key = Ipv6Addr::from_bits(query.from.to_bits() ^ query.to.to_bits());
 
-    Html(key.to_string())
+    key.to_string()
 }
 
 // day -1
@@ -1036,9 +976,8 @@ async fn day_1_hello_world() -> &'static str {
 }
 
 async fn day_1_seek() -> impl IntoResponse {
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(LOCATION, "https://www.youtube.com/watch?v=9Gc4QTqslN4")
-        .body(Body::empty())
-        .unwrap()
+    (
+        StatusCode::FOUND,
+        [(LOCATION, "https://www.youtube.com/watch?v=9Gc4QTqslN4")],
+    )
 }
