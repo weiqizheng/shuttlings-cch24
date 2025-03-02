@@ -8,25 +8,25 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{header::LOCATION, HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION},
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use base64::prelude::*;
 // use cargo_lock::Lockfile;
 use cargo_manifest::{Manifest, MaybeInherited::Local};
 use jsonwebtoken::{
-    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };
 use jyt::{Converter, Ext};
 use leaky_bucket::RateLimiter;
-use rand::{distributions::Alphanumeric, rngs::StdRng, thread_rng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, distributions::Alphanumeric, rngs::StdRng, thread_rng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{postgres::PgQueryResult, prelude::FromRow, types::uuid, PgPool};
+use sqlx::{PgPool, postgres::PgQueryResult, prelude::FromRow, types::uuid};
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tracing::*;
@@ -40,13 +40,13 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
     let router = Router::new()
         .nest_service("/assets", ServeDir::new("assets"))
         .route("/23/star", get(day_23_star))
-        .route("/23/present/:color", get(day_23_present))
-        .route("/23/ornament/:state/:n", get(day_23_ornament))
+        .route("/23/present/{color}", get(day_23_present))
+        .route("/23/ornament/{state}/{n}", get(day_23_ornament))
         .route("/23/lockfile", post(day_23_lockfile))
         .route("/19/reset", post(day_19_reset))
-        .route("/19/cite/:id", get(day_19_cite))
-        .route("/19/remove/:id", delete(day_19_remove))
-        .route("/19/undo/:id", put(day_19_undo))
+        .route("/19/cite/{id}", get(day_19_cite))
+        .route("/19/remove/{id}", delete(day_19_remove))
+        .route("/19/undo/{id}", put(day_19_undo))
         .route("/19/draft", post(day_19_draft))
         .route("/19/list", get(day_19_list))
         .with_state(Arc::new(Day19AppState {
@@ -57,7 +57,7 @@ async fn main(#[shuttle_shared_db::Postgres] pool: PgPool) -> shuttle_axum::Shut
         .route("/16/wrap", post(day_16_wrap))
         .route("/16/unwrap", get(day_16_unwrap))
         .route("/12/random-board", get(day_12_random_board))
-        .route("/12/place/:team/:column", post(day_12_place))
+        .route("/12/place/{team}/{column}", post(day_12_place))
         .route("/12/board", get(day_12_board))
         .route("/12/reset", post(day_12_reset))
         .with_state(Arc::new(Day12AppState {
@@ -675,7 +675,7 @@ async fn day_12_random_board(State(state): State<Arc<Day12AppState>>) -> impl In
     let mut game = state.game.lock().await;
     for i in 0..4 {
         for j in 1..5 {
-            let team = if game.rng.gen::<bool>() {
+            let team = if game.rng.r#gen::<bool>() {
                 GameItem::Cookie
             } else {
                 GameItem::Milk
